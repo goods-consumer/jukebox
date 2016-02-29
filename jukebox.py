@@ -1,83 +1,121 @@
-from gmusicapi import Mobileclient
-import sys
-import spotipy
-import spotipy.util as util
-from unidecode import unidecode
 import requests
-requests.packages.urllib3.disable_warnings()
+import soundcloud
+import spotipy
 
-def log_into_Google():
-	gAccount = raw_input("Google account name:")
-	gPwd = raw_input("Google password:")
-	logged_in = gMusic.login(gAccount, gPwd, gMusic.FROM_MAC_ADDRESS)
-	# logged_in is True if login was successful
-	if logged_in:
-		print("Successfully logged into Google Play Music.")
-	else:
-		print("Login unsuccessful.")
-		sys.exit(0)
+from flask import Flask, render_template, redirect, request, session, url_for, jsonify
+from flask_debugtoolbar import DebugToolbarExtension
+from copy import deepcopy
 
-def retrieve_music_from_Google():
-	gMusicSongs = gMusic.get_all_user_playlist_contents()
-	charsToRemove = set(['[', ']', '(', ')', '&'])
-	for playlist in gMusicSongs:
-		name = playlist['name']
-		songs = []
-		for returnedValues in playlist['tracks']:
-			if 'track' in returnedValues:
-				title = filter(lambda x: x not in charsToRemove, str(returnedValues['track']['title']))
-				artist = filter(lambda x: x not in charsToRemove, str(returnedValues['track']['artist']))
-				duration = stuff['track']['durationMillis']
-				songs.append([unidecode(title + ' ' + artist), duration])
-		songs_dict[name] = songs
+SPOTIPY_CLIENT_ID=""
+SPOTIPY_CLIENT_SECRET=""
 
-def log_into_Spotify():
-	scope = 'playlist-modify-public'
-	sID = raw_input("Spotify client id:")
-	sSecret = raw_input("Spotify client secret:")
-	uri = 'http://google.com'
-	token = util.prompt_for_user_token(sUsername, scope, sID, sSecret, uri)
-	return token
+app = Flask(__name__)
 
-def transfer_music_to_Spotify():
-	sp = spotipy.Spotify(auth=log_into_Spotify())
-	print("Successfully logged into Spotify.")
-	current_playlists = []
-	for item in sp.user_playlists(sUsername)['items']:
-		current_playlists.append(item['name'])
-	current_playlists_dict = {}
-	fails = [] #stores names of songs not found in Spotify
-	for playlist in songs_dict:
-		if playlist not in current_playlists: #avoid overwriting existing playlists
-			sp.user_playlist_create(sUsername, playlist)
-			for playlist in sp.user_playlists(sUsername)['items']:
-				current_playlists_dict[playlist['name']] = playlist['id']
-	for playlist in songs_dict:
-		if playlist in current_playlists_dict:
-			songs_to_add = []
-			for songs in songs_dict[playlist]:
-				matches = sp.search(songs[0], 20, 0, 'track')['tracks']['items'] #get top 20 matches
-				length = len(matches)
-				if length == 0:
-					print("Song not found: " + songs[0])
-					fails.append(songs[0])
-				else:
-					for i in range(length):
-						song = matches[i]
-						if abs((song['duration_ms']) - int(songs[1])) <= 1000: #compare tracks based on length
-							songs_to_add.append(song['id'])
-							break	
-						elif i == length - 1:
-							fails.append(songs[0])
-			sp.user_playlist_add_tracks(sUsername, current_playlists_dict[playlist], songs_to_add)
-	print("Done transferring playlists.")
-	if len(fails) != 0:		
-		print("Songs not found on Spotify:")		
-		print(fails)
+# Required to use Flask sessions and the debug toolbar
+app.secret_key = "secret"
 
-gMusic = Mobileclient()
-songs_dict = {}
-log_into_Google()
-retrieve_music_from_Google()
-sUsername = raw_input("Spotify account name:")
-transfer_music_to_Spotify()
+soundcloud = soundcloud.Client(
+    client_id="",
+    client_secret="",
+    redirect_uri='http://127.0.0.1:5000/sccallback'
+)
+
+
+@app.route("/")
+def home():
+    return render_template("home.html")
+
+
+@app.route("/login-form")
+def login():
+    parameters = [
+        "client_id={}".format(SPOTIPY_CLIENT_ID),
+        "redirect_uri={}".format("http://127.0.0.1:5000/spcallback"),
+        "response_type=code",
+        "scope=playlist-modify-public playlist-modify-private"
+        ]
+    sp_url = "https://accounts.spotify.com/authorize?"
+    sp_url += "&".join(parameters)
+    return redirect(sp_url)
+
+
+@app.route("/spcallback")
+def spcallback():
+    # POST code from Spotify redirect to get access token
+    code = request.args.get("code")
+    error = request.args.get("error")
+    if error:
+        return("Error! {}".format(error))
+    # exchange code for an access token
+    TOKEN_URL = "https://accounts.spotify.com/api/token"
+    data = {
+        "client_id": SPOTIPY_CLIENT_ID,
+        "client_secret":SPOTIPY_CLIENT_SECRET,
+        "redirect_uri": "http://127.0.0.1:5000/spcallback",
+        "code": code,
+        "grant_type": "authorization_code"
+    }
+    r = requests.post(TOKEN_URL, data=data)
+    token = r.json().get("access_token")
+    if token:
+        session["token"] = token
+        return redirect(soundcloud.authorize_url())
+    return render_template('error.html')
+
+    
+@app.route("/sccallback")
+def sccallback():
+    client_token = soundcloud.exchange_token(code=request.args.get('code')).fields()
+    access_token = client_token["access_token"]
+    scope = client_token["scope"]
+    sc_playlists = soundcloud.get('/me/playlists')
+    return render_template('playlists.html', playlists = [p.title for p in sc_playlists])
+
+
+@app.route("/sc_to_sp", methods=['POST'])
+def sc_to_sp():
+    sc_playlists_list = soundcloud.get('/me/playlists')
+    sc_playlists = {}
+    for pl in sc_playlists_list:
+        sc_playlists[pl.title] = pl
+    spotify = spotipy.Spotify(session["token"])
+    user_id = spotify.current_user().get('id')
+    selected_playlists = request.form.getlist('playlists')
+    fails = {}
+    for pl in selected_playlists:
+        playlist = sc_playlists[str(pl)]
+        fails[playlist.title] = []
+        songs_to_add = []
+        for track in playlist.tracks:
+            title = track['title']
+            artist = track['user']['username']
+            duration = track['duration']
+            matches = spotify.search('{} {}'.format(title, artist))['tracks']['items']
+            if not len(matches):
+                matches = spotify.search(title)['tracks']['items']
+                # if not len(matches):
+                #     print ("No match for {}, {}.".format(title, artist))
+            success = False
+            for match in matches:
+                if abs(match['duration_ms'] - duration) <= 1321:
+                    # print ('{}, {}'.format(match['name'], match['artists'][0]['name']))
+                    songs_to_add.append(match['id'])
+                    success = True
+                    break
+            if not success:
+                fails[playlist.title].append(title)
+        if len(songs_to_add):
+            playlist_id = spotify.user_playlist_create(user_id, playlist.title)['id']
+            spotify.user_playlist_add_tracks(user_id, playlist_id, songs_to_add)
+        # else:
+        #     print ('No matches found.')
+    for key in deepcopy(fails):
+        if not len(fails[key]):
+            fails.pop(key)
+    # return jsonify(fails)
+    return render_template('fails.html', fails = fails)
+
+if __name__ == "__main__":
+    # app.debug = True
+    # DebugToolbarExtension(app)
+    app.run()

@@ -1,0 +1,12 @@
+<body>Which playlists do you want to transfer?
+
+<form action='sc_to_sp' method = "POST">
+
+{% for playlist in playlists%}
+	<input type="checkbox" value={{playlist}} name = "playlists" checked> {{playlist}} <br>
+{% endfor %}
+
+<input type="submit" value = 'submit'>
+
+</form>
+</body>

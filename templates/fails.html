@@ -1,0 +1,12 @@
+<body>These songs were not found :( <br><br>
+
+{% for fail in fails %}
+{{fail}}: <br>
+	{% for f in fails[fail] %}
+	{{f}} <br>
+	{% endfor %}
+	<br>
+{% endfor %}
+
+<a href='/'>Back to the home page.</a>
+</body>
